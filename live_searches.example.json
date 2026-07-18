@@ -9,6 +9,7 @@
       "name": "MOW-IST-MOW 2026-08-06 direct filtered",
       "url": "https://www.aviasales.ru/search/MOW0608IST06081",
       "max_price": 27000,
+      "min_price": 10000,
       "direct_only": true
     }
   ]

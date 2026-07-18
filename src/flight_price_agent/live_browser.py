@@ -13,6 +13,7 @@ class LiveSearchConfig:
     url: str
     currency: str = "rub"
     max_price: int | None = None
+    min_price: int = 10_000
     direct_only: bool = True
     wait_seconds: int = 30
     headless: bool = True
@@ -38,6 +39,7 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
         "headless": bool(raw.get("headless", True)),
         "profile_dir": raw.get("profile_dir"),
         "manual_check_seconds": int(raw.get("manual_check_seconds", 0)),
+        "min_price": int(raw.get("min_price", 10_000)),
     }
 
     searches = []
@@ -51,7 +53,7 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
 
 def check_live_search(search: LiveSearchConfig, previous_price: int | None = None) -> LiveSearchResult:
     page_text = _render_page_text(search)
-    prices = extract_prices(page_text, direct_only=search.direct_only)
+    prices = extract_prices(page_text, direct_only=search.direct_only, min_price=search.min_price)
     price = min(prices) if prices else None
 
     alert = False
@@ -71,12 +73,12 @@ def check_live_search(search: LiveSearchConfig, previous_price: int | None = Non
     return LiveSearchResult(search, price, prices[:10], alert, "; ".join(reasons))
 
 
-def extract_prices(page_text: str, direct_only: bool = True) -> list[int]:
+def extract_prices(page_text: str, direct_only: bool = True, min_price: int = 1_000) -> list[int]:
     relevant_text = _direct_flights_section(page_text) if direct_only else page_text
     prices = []
     for match in re.finditer(r"(\d[\d\s\u00a0]{2,})\s*(?:₽|руб|RUB)", relevant_text, re.IGNORECASE):
         value = int(re.sub(r"\D", "", match.group(1)))
-        if 1_000 <= value <= 1_000_000:
+        if min_price <= value <= 1_000_000:
             prices.append(value)
     return sorted(set(prices))
 
