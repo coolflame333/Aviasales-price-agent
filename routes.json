@@ -1,0 +1,35 @@
+{
+  "currency": "rub",
+  "market": "ru",
+  "threshold_percent": 12,
+  "absolute_drop": 3000,
+  "routes": [
+    {
+      "origin": "MOW",
+      "destination": "IST",
+      "departure_at": "2026-08",
+      "return_at": "2026-08",
+      "one_way": false,
+      "direct": true,
+      "destination_airports": ["IST"],
+      "departure_date_from": "2026-08-06",
+      "departure_date_to": "2026-08-06",
+      "return_date_from": "2026-08-06",
+      "return_date_to": "2026-08-06",
+      "min_trip_days": 0,
+      "outbound_departure_latest": "12:00",
+      "return_departure_earliest": "16:00",
+      "require_time_filters": false,
+      "price_sources": ["latest", "month_matrix", "direct", "calendar"],
+      "monitor_origins": ["MOW", "VKO", "SVO", "DME"],
+      "monitor_dates": ["2026-08-05", "2026-08-06", "2026-08-07"],
+      "smart_verify": true,
+      "duffel_max_offers": 1,
+      "duffel_supplier_timeout_ms": 5000,
+      "duffel_destinations": ["IST"],
+      "cabin_class": "economy",
+      "limit": 30,
+      "pages": 5
+    }
+  ]
+}
