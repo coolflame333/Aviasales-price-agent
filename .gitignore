@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 browsers/
+browser-profile/
 .env
 data/*.sqlite
 data/*.sqlite-*

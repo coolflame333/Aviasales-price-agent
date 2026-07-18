@@ -16,6 +16,8 @@ class LiveSearchConfig:
     direct_only: bool = True
     wait_seconds: int = 30
     headless: bool = True
+    profile_dir: str | None = None
+    manual_check_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,8 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
         "currency": str(raw.get("currency", "rub")).lower(),
         "wait_seconds": int(raw.get("wait_seconds", 30)),
         "headless": bool(raw.get("headless", True)),
+        "profile_dir": raw.get("profile_dir"),
+        "manual_check_seconds": int(raw.get("manual_check_seconds", 0)),
     }
 
     searches = []
@@ -137,8 +141,22 @@ def _render_page_text(search: LiveSearchConfig) -> str:
         ) from exc
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=search.headless)
-        page = browser.new_page(locale="ru-RU")
+        try:
+            text = _render_with_context(playwright, search)
+        except Exception:
+            if not search.profile_dir:
+                raise
+            fallback = LiveSearchConfig(
+                **{**search.__dict__, "profile_dir": None}
+            )
+            text = _render_with_context(playwright, fallback)
+    return text
+
+
+def _render_with_context(playwright, search: LiveSearchConfig) -> str:
+    context = _new_context(playwright, search)
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
         page.goto(search.url, wait_until="domcontentloaded", timeout=search.wait_seconds * 1000)
         _click_text(page, "Да без проблем")
         if _click_text(page, "Найти билеты"):
@@ -151,9 +169,26 @@ def _render_page_text(search: LiveSearchConfig) -> str:
         except Exception:
             pass
         _wait_for_results(page, search.wait_seconds)
-        text = page.locator("body").inner_text(timeout=search.wait_seconds * 1000)
-        browser.close()
-    return text
+        if _looks_like_bot_check(page) and search.manual_check_seconds > 0:
+            page.wait_for_timeout(search.manual_check_seconds * 1000)
+            _wait_for_results(page, search.wait_seconds)
+        return page.locator("body").inner_text(timeout=search.wait_seconds * 1000)
+    finally:
+        context.close()
+
+
+def _new_context(playwright, search: LiveSearchConfig):
+    if search.profile_dir:
+        profile_dir = Path(search.profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=search.headless,
+            locale="ru-RU",
+        )
+
+    browser = playwright.chromium.launch(headless=search.headless)
+    return browser.new_context(locale="ru-RU")
 
 
 def _click_text(page, text: str, timeout_ms: int = 3_000) -> bool:
@@ -173,3 +208,19 @@ def _wait_for_results(page, wait_seconds: int) -> None:
         except Exception:
             continue
     page.wait_for_timeout(5_000)
+
+
+def _looks_like_bot_check(page) -> bool:
+    try:
+        text = page.locator("body").inner_text(timeout=5_000).lower()
+    except Exception:
+        return False
+    markers = (
+        "не робот",
+        "я не робот",
+        "докажите",
+        "captcha",
+        "капча",
+        "проверка",
+    )
+    return any(marker in text for marker in markers)

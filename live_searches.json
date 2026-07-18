@@ -2,6 +2,8 @@
   "currency": "rub",
   "wait_seconds": 45,
   "headless": false,
+  "profile_dir": "browser-profile",
+  "manual_check_seconds": 120,
   "searches": [
     {
       "name": "MOW-IST-MOW 2026-08-06 direct filtered",
