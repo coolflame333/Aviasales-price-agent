@@ -5,7 +5,7 @@ import json
 import os
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from flight_price_agent.client import TravelpayoutsClient, demo_offers
@@ -314,6 +314,66 @@ def _route_key_label(route_key: str) -> tuple[str, str, str]:
     return origin, destination, f" -> {origin}" if trip_kind == "roundtrip" else ""
 
 
+def _route_label(route_key: str) -> str:
+    parts = route_key.split("|")
+    origin, destination, trip_label = _route_key_label(route_key)
+    departure_at = parts[9].removeprefix("dep_from:") if len(parts) > 9 else ""
+    return_at = parts[11].removeprefix("ret_from:") if len(parts) > 11 else ""
+    date_label = departure_at if departure_at and departure_at != "*" else "any date"
+    if return_at and return_at not in ("*", departure_at):
+        date_label = f"{date_label}/{return_at}"
+    return f"{origin} -> {destination}{trip_label} {date_label}"
+
+
+def _format_dt(value: datetime) -> str:
+    return value.astimezone().replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S local time")
+
+
+def build_status_message(
+    statuses: list,
+    route_labels: dict[str, str],
+    currency: str,
+    stale_minutes: int,
+) -> str:
+    checked = [status for status in statuses if status.checked_at_utc]
+    with_prices = [status for status in checked if status.had_offers]
+    without_prices = [status for status in checked if status.had_offers is False]
+    missing = len(statuses) - len(checked)
+
+    latest_check = max(
+        (datetime.fromisoformat(status.checked_at_utc) for status in checked),
+        default=None,
+    )
+    stale = False
+    if latest_check:
+        stale = (datetime.now(UTC) - latest_check).total_seconds() > stale_minutes * 60
+
+    lines = ["Aviasales price monitor", "Agent status"]
+    lines.append("")
+    lines.append(f"Routes checked: {len(checked)}/{len(statuses)}")
+    lines.append(f"Routes with prices: {len(with_prices)}")
+    lines.append(f"Routes without prices: {len(without_prices)}")
+    if missing:
+        lines.append(f"Never checked: {missing}")
+    lines.append(f"Status: {'stale' if stale else 'ok'}")
+    lines.append(f"Last check: {_format_dt(latest_check) if latest_check else 'n/a'}")
+
+    best = min(with_prices, key=lambda status: status.best_price or 10**12, default=None)
+    if best:
+        lines.append(f"Best current price: {best.best_price} {currency.upper()}")
+        lines.append(f"Best route: {route_labels.get(best.route_key, best.route_key)}")
+
+    recent_prices = sorted(with_prices, key=lambda status: status.best_price or 10**12)
+    if recent_prices:
+        lines.append("")
+        lines.append("Top current prices:")
+        for index, status in enumerate(recent_prices[:5], 1):
+            label = route_labels.get(status.route_key, status.route_key)
+            lines.append(f"{index}. {label}: {status.best_price} {currency.upper()}")
+
+    return "\n".join(lines)
+
+
 def digest_command(args: argparse.Namespace) -> int:
     load_env_file(args.env)
     config = load_config(args.config)
@@ -330,6 +390,28 @@ def digest_command(args: argparse.Namespace) -> int:
         try:
             TelegramNotifier.from_env().send_message(message, reply_markup=markup)
             print("telegram digest sent")
+        except ValueError as exc:
+            print(f"telegram skipped: {exc}", flush=True)
+    return 0
+
+
+def status_command(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    config = load_config(args.config)
+    route_keys = [route.key for route in config.routes]
+    route_labels = {route.key: _route_label(route.key) for route in config.routes}
+    store = PriceStore(args.db)
+    try:
+        statuses = store.latest_route_checks(route_keys, config.currency)
+    finally:
+        store.close()
+
+    message = build_status_message(statuses, route_labels, config.currency, args.stale_minutes)
+    print(message)
+    if args.notify:
+        try:
+            TelegramNotifier.from_env().send_message(message)
+            print("telegram status sent")
         except ValueError as exc:
             print(f"telegram skipped: {exc}", flush=True)
     return 0
@@ -434,6 +516,19 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--hours", type=int, default=12, help="History window")
     digest.add_argument("--notify", action="store_true", help="Send digest to Telegram")
     digest.set_defaults(func=digest_command)
+
+    status = subparsers.add_parser("status", help="Print or send agent health status")
+    status.add_argument("--config", default="routes.json", help="Path to JSON route config")
+    status.add_argument("--db", default="data/prices.sqlite", help="SQLite database path")
+    status.add_argument("--env", default=".env", help="Optional .env file with Telegram settings")
+    status.add_argument(
+        "--stale-minutes",
+        type=int,
+        default=90,
+        help="Mark the agent stale if the last check is older than this",
+    )
+    status.add_argument("--notify", action="store_true", help="Send status to Telegram")
+    status.set_defaults(func=status_command)
 
     telegram = subparsers.add_parser("test-telegram", help="Send a Telegram test message")
     telegram.add_argument("--env", default=".env", help="Optional .env file with Telegram settings")

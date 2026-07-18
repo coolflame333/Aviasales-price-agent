@@ -18,6 +18,15 @@ class PreviousStats:
     previous_check_at: str | None = None
 
 
+@dataclass(frozen=True)
+class RouteCheckStatus:
+    route_key: str
+    checked_at_utc: str | None
+    had_offers: bool | None
+    best_price: int | None
+    reason: str | None
+
+
 class PriceStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -227,6 +236,45 @@ class PriceStore:
             """,
             (f"-{hours} hours",),
         ).fetchall()
+
+    def latest_route_checks(
+        self,
+        route_keys: list[str],
+        currency: str,
+    ) -> list[RouteCheckStatus]:
+        statuses: list[RouteCheckStatus] = []
+        for route_key in route_keys:
+            row = self.connection.execute(
+                """
+                SELECT checked_at_utc, had_offers, best_price, reason
+                FROM route_checks
+                WHERE route_key = ? AND currency = ?
+                ORDER BY checked_at_utc DESC
+                LIMIT 1
+                """,
+                (route_key, currency),
+            ).fetchone()
+            if row:
+                statuses.append(
+                    RouteCheckStatus(
+                        route_key=route_key,
+                        checked_at_utc=row["checked_at_utc"],
+                        had_offers=bool(row["had_offers"]),
+                        best_price=row["best_price"],
+                        reason=row["reason"],
+                    )
+                )
+            else:
+                statuses.append(
+                    RouteCheckStatus(
+                        route_key=route_key,
+                        checked_at_utc=None,
+                        had_offers=None,
+                        best_price=None,
+                        reason=None,
+                    )
+                )
+        return statuses
 
     def notification_sent_recently(
         self,

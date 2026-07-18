@@ -242,4 +242,30 @@ python src/main.py digest --config routes.json --db data/prices.sqlite --env .en
 scripts\run_digest.bat
 ```
 
+## Контроль агента
+
+Команда `status` показывает, жив ли мониторинг по данным SQLite: сколько маршрутов уже проверялось, сколько маршрутов сейчас с ценами, когда была последняя проверка и какая лучшая текущая цена.
+
+```powershell
+python src/main.py status --config routes.json --db data/prices.sqlite --env .env
+```
+
+Отправить контрольное сообщение в Telegram:
+
+```powershell
+python src/main.py status --config routes.json --db data/prices.sqlite --env .env --notify
+```
+
+Для отдельного утреннего/вечернего health-check в Windows Task Scheduler можно использовать:
+
+```powershell
+scripts\run_status.bat
+```
+
+По умолчанию статус считается устаревшим, если последняя сохраненная проверка старше 90 минут. Порог можно изменить:
+
+```powershell
+python src/main.py status --stale-minutes 120
+```
+
 Amadeus Self-Service закрыт с 17 июля 2026 года, поэтому Amadeus Enterprise не используется как основной путь для личного агента.
