@@ -100,6 +100,23 @@ class PriceStore:
             "CREATE INDEX IF NOT EXISTS idx_route_checks_route_time "
             "ON route_checks(route_key, currency, checked_at_utc)"
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                checked_at_utc TEXT NOT NULL,
+                search_name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                price INTEGER,
+                reason TEXT
+            )
+            """
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_checks_name_time "
+            "ON live_checks(search_name, currency, checked_at_utc)"
+        )
         self.connection.commit()
 
     def previous_stats(self, route_key: str, currency: str) -> PreviousStats:
@@ -212,6 +229,39 @@ class PriceStore:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (checked_at, route_key, currency, 1 if had_offers else 0, best_price, reason),
+        )
+        self.connection.commit()
+
+    def previous_live_price(self, search_name: str, currency: str) -> int | None:
+        row = self.connection.execute(
+            """
+            SELECT price
+            FROM live_checks
+            WHERE search_name = ? AND currency = ? AND price IS NOT NULL
+            ORDER BY checked_at_utc DESC
+            LIMIT 1
+            """,
+            (search_name, currency),
+        ).fetchone()
+        return row["price"] if row else None
+
+    def record_live_check(
+        self,
+        search_name: str,
+        url: str,
+        currency: str,
+        price: int | None,
+        reason: str,
+    ) -> None:
+        checked_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        self.connection.execute(
+            """
+            INSERT INTO live_checks (
+                checked_at_utc, search_name, url, currency, price, reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (checked_at, search_name, url, currency, price, reason),
         )
         self.connection.commit()
 

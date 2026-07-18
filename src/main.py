@@ -11,6 +11,12 @@ from pathlib import Path
 from flight_price_agent.client import TravelpayoutsClient, demo_offers
 from flight_price_agent.config import example_config, load_config
 from flight_price_agent.duffel import DuffelClient, duffel_airport_pairs
+from flight_price_agent.live_browser import (
+    check_live_search,
+    format_live_results,
+    live_buttons,
+    load_live_config,
+)
 from flight_price_agent.monitor import RouteReport, analyze_route, format_report
 from flight_price_agent.notifier import (
     TelegramNotifier,
@@ -471,6 +477,54 @@ def check_duffel(args: argparse.Namespace) -> int:
     return 0
 
 
+def live_check_command(args: argparse.Namespace) -> int:
+    load_env_file(args.env)
+    searches = load_live_config(args.live_config)
+    store = PriceStore(args.db)
+    results = []
+    try:
+        for search in searches:
+            previous_price = store.previous_live_price(search.name, search.currency)
+            result = check_live_search(search, previous_price=previous_price)
+            results.append(result)
+            store.record_live_check(
+                search_name=search.name,
+                url=search.url,
+                currency=search.currency,
+                price=result.price,
+                reason=result.reason,
+            )
+    finally:
+        store.close()
+
+    message = format_live_results(results)
+    print(message)
+    should_notify = args.notify_always or any(result.alert for result in results)
+    if args.notify and should_notify:
+        try:
+            TelegramNotifier.from_env().send_message(message, reply_markup=live_buttons(results))
+            print("telegram live notification sent")
+        except ValueError as exc:
+            print(f"telegram skipped: {exc}", flush=True)
+    return 1 if any(result.alert for result in results) and not args.no_alert_exit_code else 0
+
+
+def live_watch_command(args: argparse.Namespace) -> int:
+    interval_seconds = max(60, args.every_minutes * 60)
+    try:
+        while True:
+            checked_at = datetime.now().astimezone().replace(microsecond=0).isoformat()
+            print(f"\n=== live check {checked_at} ===", flush=True)
+            try:
+                live_check_command(args)
+            except Exception as exc:
+                print(f"live check failed: {exc}", flush=True)
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return 130
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aviasales Data API price monitoring agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -539,6 +593,25 @@ def build_parser() -> argparse.ArgumentParser:
     duffel.add_argument("--env", default=".env", help="Optional .env file with Duffel settings")
     duffel.add_argument("--max-offers", type=int, default=1, help="Offers to request per airport pair")
     duffel.set_defaults(func=check_duffel)
+
+    live = subparsers.add_parser("live-check", help="Check rendered live search pages")
+    live.add_argument("--live-config", default="live_searches.json", help="Path to live search config")
+    live.add_argument("--db", default="data/prices.sqlite", help="SQLite database path")
+    live.add_argument("--env", default=".env", help="Optional .env file with Telegram settings")
+    live.add_argument("--notify", action="store_true", help="Send Telegram message on buy signal")
+    live.add_argument("--notify-always", action="store_true", help="Send Telegram message after every live check")
+    live.add_argument("--no-alert-exit-code", action="store_true", help="Return 0 even when buy signal is detected")
+    live.set_defaults(func=live_check_command)
+
+    live_watch = subparsers.add_parser("live-watch", help="Run rendered live checks in a loop")
+    live_watch.add_argument("--live-config", default="live_searches.json", help="Path to live search config")
+    live_watch.add_argument("--db", default="data/prices.sqlite", help="SQLite database path")
+    live_watch.add_argument("--env", default=".env", help="Optional .env file with Telegram settings")
+    live_watch.add_argument("--every-minutes", type=int, default=30, help="Polling interval")
+    live_watch.add_argument("--notify", action="store_true", help="Send Telegram message on buy signal")
+    live_watch.add_argument("--notify-always", action="store_true", help="Send Telegram message after every live check")
+    live_watch.add_argument("--no-alert-exit-code", action="store_true", help="Return 0 even when buy signal is detected")
+    live_watch.set_defaults(func=live_watch_command)
 
     return parser
 

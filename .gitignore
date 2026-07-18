@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.venv/
+browsers/
 .env
 data/*.sqlite
 data/*.sqlite-*

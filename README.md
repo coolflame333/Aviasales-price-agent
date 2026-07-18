@@ -268,4 +268,53 @@ scripts\run_status.bat
 python src/main.py status --stale-minutes 120
 ```
 
+## Live buy-pager
+
+Для покупки по минимальной цене в моменте используйте отдельный live-режим. Он не читает Aviasales Data API, а открывает конкретную страницу поиска в браузере через Playwright и берет минимальную видимую цену из блока прямых рейсов.
+
+Это более хрупкий режим, потому что он зависит от текущей верстки сайта, но он ближе к реальной цене покупки, чем кэшовый API. Для Aviasales обычно надежнее `headless: false`, то есть проверка в обычном видимом окне браузера.
+
+Установка Playwright:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install playwright
+$env:PLAYWRIGHT_BROWSERS_PATH = "browsers\ms-playwright"
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Настройка:
+
+```powershell
+Copy-Item live_searches.example.json live_searches.json
+notepad live_searches.json
+```
+
+В `live_searches.json` лучше вставить URL, который вы получили после ручной настройки фильтров на Aviasales: даты, прямые рейсы, нужные времена вылета и возврата. Поле `max_price` задает цену покупки/срочного уведомления. Если точный фильтр не сохраняется в URL, live-режим все равно откроет страницу и даст кнопку для быстрой ручной проверки.
+
+Разовая live-проверка:
+
+```powershell
+python src/main.py live-check --live-config live_searches.json --db data/prices.sqlite --env .env --notify
+```
+
+Если Playwright установлен в `.venv`:
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = "browsers\ms-playwright"
+.\.venv\Scripts\python.exe src/main.py live-check --live-config live_searches.json --db data/prices.sqlite --env .env --notify
+```
+
+Запуск в цикле:
+
+```powershell
+python src/main.py live-watch --live-config live_searches.json --every-minutes 30 --notify
+```
+
+Для Windows Task Scheduler можно использовать:
+
+```powershell
+scripts\run_live_once.bat
+```
+
 Amadeus Self-Service закрыт с 17 июля 2026 года, поэтому Amadeus Enterprise не используется как основной путь для личного агента.
