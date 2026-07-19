@@ -6,10 +6,11 @@
   "manual_check_seconds": 120,
   "searches": [
     {
-      "name": "MOW-IST-MOW 2026-08-06 direct filtered",
-      "url": "https://www.aviasales.ru/search/MOW0608IST06081",
-      "max_price": 27000,
-      "min_price": 10000,
+      "name": "MOW-IST 2026-08-06 one-way direct filtered",
+      "url": "https://www.aviasales.ru/search/MOW0608IST1",
+      "max_price": 13200,
+      "min_price": 5000,
+      "outbound_departure_latest": "12:00",
       "direct_only": true
     }
   ]

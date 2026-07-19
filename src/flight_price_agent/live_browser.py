@@ -19,6 +19,7 @@ class LiveSearchConfig:
     headless: bool = True
     profile_dir: str | None = None
     manual_check_seconds: int = 0
+    outbound_departure_latest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
         "profile_dir": raw.get("profile_dir"),
         "manual_check_seconds": int(raw.get("manual_check_seconds", 0)),
         "min_price": int(raw.get("min_price", 10_000)),
+        "outbound_departure_latest": raw.get("outbound_departure_latest"),
     }
 
     searches = []
@@ -53,7 +55,12 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
 
 def check_live_search(search: LiveSearchConfig, previous_price: int | None = None) -> LiveSearchResult:
     page_text = _render_page_text(search)
-    prices = extract_prices(page_text, direct_only=search.direct_only, min_price=search.min_price)
+    prices = extract_prices(
+        page_text,
+        direct_only=search.direct_only,
+        min_price=search.min_price,
+        outbound_departure_latest=search.outbound_departure_latest,
+    )
     price = min(prices) if prices else None
 
     alert = False
@@ -73,8 +80,18 @@ def check_live_search(search: LiveSearchConfig, previous_price: int | None = Non
     return LiveSearchResult(search, price, prices[:10], alert, "; ".join(reasons))
 
 
-def extract_prices(page_text: str, direct_only: bool = True, min_price: int = 1_000) -> list[int]:
+def extract_prices(
+    page_text: str,
+    direct_only: bool = True,
+    min_price: int = 1_000,
+    outbound_departure_latest: str | None = None,
+) -> list[int]:
     relevant_text = _direct_flights_section(page_text) if direct_only else page_text
+    if outbound_departure_latest:
+        prices = _extract_timed_prices(relevant_text, outbound_departure_latest, min_price)
+        if prices:
+            return prices
+
     prices = []
     for match in re.finditer(r"(\d[\d\s\u00a0]{2,})\s*(?:₽|руб|RUB)", relevant_text, re.IGNORECASE):
         value = int(re.sub(r"\D", "", match.group(1)))
@@ -112,7 +129,9 @@ def live_buttons(results: list[LiveSearchResult]) -> dict[str, Any] | None:
 
 def _direct_flights_section(page_text: str) -> str:
     lower = page_text.lower()
-    start = lower.find("прямые рейсы")
+    direct_marker = "прямые рейсы"
+    starts = [match.start() for match in re.finditer(re.escape(direct_marker), lower)]
+    start = starts[-1] if starts else -1
     if start == -1:
         return page_text
 
@@ -122,6 +141,9 @@ def _direct_flights_section(page_text: str) -> str:
         lower_tail.find(marker)
         for marker in (
             "рекомендованный",
+            "рекомендуемый",
+            "оптимальный",
+            "самый дешёвый",
             "рейсы с пересадками",
             "с пересадками",
             "другие рейсы",
@@ -131,6 +153,50 @@ def _direct_flights_section(page_text: str) -> str:
     if not end_candidates:
         return tail
     return tail[: min(end_candidates)]
+
+
+def _extract_timed_prices(section_text: str, latest_time: str, min_price: int) -> list[int]:
+    latest_minutes = _time_to_minutes(latest_time)
+    if latest_minutes is None:
+        return []
+
+    lines = [line.strip() for line in section_text.splitlines() if line.strip()]
+    prices: list[int] = []
+    for index, line in enumerate(lines):
+        price = _parse_price(line)
+        if price is None or price < min_price or price > 1_000_000:
+            continue
+
+        next_lines = lines[index + 1 :]
+        next_price_index = next(
+            (offset for offset, next_line in enumerate(next_lines) if _parse_price(next_line) is not None),
+            len(next_lines),
+        )
+        time_lines = next_lines[:next_price_index]
+        if any(
+            (minutes := _time_to_minutes(candidate)) is not None and minutes <= latest_minutes
+            for candidate in time_lines
+        ):
+            prices.append(price)
+    return sorted(set(prices))
+
+
+def _parse_price(text: str) -> int | None:
+    match = re.search(r"(\d[\d\s\u00a0\u202f]{2,})\s*(?:₽|руб|RUB)", text, re.IGNORECASE)
+    if not match:
+        return None
+    return int(re.sub(r"\D", "", match.group(1)))
+
+
+def _time_to_minutes(text: str) -> int | None:
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", text)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    if hours > 23 or minutes > 59:
+        return None
+    return hours * 60 + minutes
 
 
 def _render_page_text(search: LiveSearchConfig) -> str:
