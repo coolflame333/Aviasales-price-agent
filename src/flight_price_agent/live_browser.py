@@ -30,6 +30,16 @@ class LiveSearchResult:
     prices: list[int]
     alert: bool
     reason: str
+    best_match: LivePriceCandidate | None = None
+
+
+@dataclass(frozen=True)
+class LivePriceCandidate:
+    price: int
+    departure_time: str | None = None
+    arrival_time: str | None = None
+    origin_airport: str | None = None
+    destination_airport: str | None = None
 
 
 def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
@@ -58,13 +68,15 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
 
 def check_live_search(search: LiveSearchConfig, previous_price: int | None = None) -> LiveSearchResult:
     page_text = _render_page_text(search)
-    prices = extract_prices(
+    candidates = extract_price_candidates(
         page_text,
         direct_only=search.direct_only,
         min_price=search.min_price,
         outbound_departure_latest=search.outbound_departure_latest,
         excluded_origin_airports=search.excluded_origin_airports,
     )
+    prices = [candidate.price for candidate in candidates]
+    best_match = candidates[0] if candidates else None
     price = min(prices) if prices else None
 
     alert = False
@@ -81,7 +93,7 @@ def check_live_search(search: LiveSearchConfig, previous_price: int | None = Non
         if not reasons:
             reasons.append("no buy signal")
 
-    return LiveSearchResult(search, price, prices[:10], alert, "; ".join(reasons))
+    return LiveSearchResult(search, price, prices[:10], alert, "; ".join(reasons), best_match=best_match)
 
 
 def extract_prices(
@@ -91,22 +103,40 @@ def extract_prices(
     outbound_departure_latest: str | None = None,
     excluded_origin_airports: tuple[str, ...] = (),
 ) -> list[int]:
+    return [
+        candidate.price
+        for candidate in extract_price_candidates(
+            page_text,
+            direct_only=direct_only,
+            min_price=min_price,
+            outbound_departure_latest=outbound_departure_latest,
+            excluded_origin_airports=excluded_origin_airports,
+        )
+    ]
+
+
+def extract_price_candidates(
+    page_text: str,
+    direct_only: bool = True,
+    min_price: int = 1_000,
+    outbound_departure_latest: str | None = None,
+    excluded_origin_airports: tuple[str, ...] = (),
+) -> list[LivePriceCandidate]:
     relevant_text = _direct_flights_section(page_text) if direct_only else page_text
     if outbound_departure_latest:
-        prices = _extract_timed_prices(
+        return _extract_timed_candidates(
             relevant_text,
             outbound_departure_latest,
             min_price,
             excluded_origin_airports,
         )
-        return prices
 
-    prices = []
+    candidates = []
     for match in re.finditer(r"(\d[\d\s\u00a0]{2,})\s*(?:₽|руб|RUB)", relevant_text, re.IGNORECASE):
         value = int(re.sub(r"\D", "", match.group(1)))
         if min_price <= value <= 1_000_000:
-            prices.append(value)
-    return sorted(set(prices))
+            candidates.append(LivePriceCandidate(value))
+    return sorted({candidate.price: candidate for candidate in candidates}.values(), key=lambda candidate: candidate.price)
 
 
 def format_live_results(results: list[LiveSearchResult]) -> str:
@@ -121,6 +151,8 @@ def format_live_results(results: list[LiveSearchResult]) -> str:
             lines.append("Visible price: n/a")
         else:
             lines.append(f"Visible price: {result.price} {result.search.currency.upper()}")
+            if result.best_match is not None:
+                lines.append(f"Best match: {_format_candidate(result.best_match)}")
         lines.append(f"Reason: {result.reason}")
         lines.append(f"Open: {result.search.url}")
     return "\n".join(lines)
@@ -167,13 +199,30 @@ def _extract_timed_prices(
     min_price: int,
     excluded_origin_airports: tuple[str, ...] = (),
 ) -> list[int]:
+    return [
+        candidate.price
+        for candidate in _extract_timed_candidates(
+            section_text,
+            latest_time,
+            min_price,
+            excluded_origin_airports,
+        )
+    ]
+
+
+def _extract_timed_candidates(
+    section_text: str,
+    latest_time: str,
+    min_price: int,
+    excluded_origin_airports: tuple[str, ...] = (),
+) -> list[LivePriceCandidate]:
     latest_minutes = _time_to_minutes(latest_time)
     if latest_minutes is None:
         return []
 
     lines = [line.strip() for line in section_text.splitlines() if line.strip()]
     excluded_airports = {airport.upper() for airport in excluded_origin_airports}
-    prices: list[int] = []
+    candidates: list[LivePriceCandidate] = []
     for index, line in enumerate(lines):
         price = _parse_price(line)
         if price is None or price < min_price or price > 1_000_000:
@@ -195,24 +244,48 @@ def _extract_timed_prices(
         if "пересад" in flight_text:
             continue
         if excluded_airports:
-            block_airports = {
+            block_airports = [
                 candidate.upper()
                 for candidate in flight_lines
                 if re.fullmatch(r"[A-ZА-Я]{3}", candidate.upper())
-            }
-            if block_airports & excluded_airports:
+            ]
+            if set(block_airports) & excluded_airports:
                 continue
             if not block_airports:
                 continue
+        else:
+            block_airports = [
+                candidate.upper()
+                for candidate in flight_lines
+                if re.fullmatch(r"[A-ZА-Я]{3}", candidate.upper())
+            ]
 
         flight_times = [
-            minutes
+            candidate
             for candidate in flight_lines
-            if (minutes := _time_to_minutes(candidate)) is not None
+            if _time_to_minutes(candidate) is not None
         ]
-        if flight_times and flight_times[0] <= latest_minutes:
-            prices.append(price)
-    return sorted(set(prices))
+        if not flight_times:
+            continue
+        if (departure_minutes := _time_to_minutes(flight_times[0])) is None or departure_minutes > latest_minutes:
+            continue
+        candidates.append(
+            LivePriceCandidate(
+                price=price,
+                departure_time=flight_times[0],
+                arrival_time=flight_times[-1] if len(flight_times) > 1 else None,
+                origin_airport=block_airports[0] if block_airports else None,
+                destination_airport=block_airports[-1] if len(block_airports) > 1 else None,
+            )
+        )
+    return sorted(
+        {(
+            candidate.price,
+            candidate.departure_time,
+            candidate.origin_airport,
+        ): candidate for candidate in candidates}.values(),
+        key=lambda candidate: candidate.price,
+    )
 
 
 def _normalize_airports(value: Any) -> tuple[str, ...]:
@@ -221,6 +294,22 @@ def _normalize_airports(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value.strip().upper(),) if value.strip() else ()
     return tuple(str(item).strip().upper() for item in value if str(item).strip())
+
+
+def _format_candidate(candidate: LivePriceCandidate) -> str:
+    route = " -> ".join(
+        airport
+        for airport in (candidate.origin_airport, candidate.destination_airport)
+        if airport
+    )
+    times = " -> ".join(
+        time
+        for time in (candidate.departure_time, candidate.arrival_time)
+        if time
+    )
+    if route and times:
+        return f"{route}, {times}"
+    return route or times or "details unavailable"
 
 
 def _parse_price(text: str) -> int | None:
