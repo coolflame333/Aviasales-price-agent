@@ -12,6 +12,7 @@
       "min_price": 5000,
       "outbound_departure_latest": "12:00",
       "excluded_origin_airports": ["ZIA"],
+      "excluded_carriers": ["Победа"],
       "direct_only": true
     }
   ]

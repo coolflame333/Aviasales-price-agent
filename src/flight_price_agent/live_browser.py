@@ -21,6 +21,7 @@ class LiveSearchConfig:
     manual_check_seconds: int = 0
     outbound_departure_latest: str | None = None
     excluded_origin_airports: tuple[str, ...] = ()
+    excluded_carriers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class LivePriceCandidate:
     arrival_time: str | None = None
     origin_airport: str | None = None
     destination_airport: str | None = None
+    carrier: str | None = None
 
 
 def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
@@ -54,12 +56,14 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
         "min_price": int(raw.get("min_price", 10_000)),
         "outbound_departure_latest": raw.get("outbound_departure_latest"),
         "excluded_origin_airports": _normalize_airports(raw.get("excluded_origin_airports")),
+        "excluded_carriers": _normalize_names(raw.get("excluded_carriers")),
     }
 
     searches = []
     for item in raw.get("searches", []):
         payload = {**defaults, **item}
         payload["excluded_origin_airports"] = _normalize_airports(payload.get("excluded_origin_airports"))
+        payload["excluded_carriers"] = _normalize_names(payload.get("excluded_carriers"))
         searches.append(LiveSearchConfig(**payload))
     if not searches:
         raise ValueError("Live config must contain at least one item in 'searches'.")
@@ -74,6 +78,7 @@ def check_live_search(search: LiveSearchConfig, previous_price: int | None = Non
         min_price=search.min_price,
         outbound_departure_latest=search.outbound_departure_latest,
         excluded_origin_airports=search.excluded_origin_airports,
+        excluded_carriers=search.excluded_carriers,
     )
     prices = [candidate.price for candidate in candidates]
     best_match = candidates[0] if candidates else None
@@ -102,6 +107,7 @@ def extract_prices(
     min_price: int = 1_000,
     outbound_departure_latest: str | None = None,
     excluded_origin_airports: tuple[str, ...] = (),
+    excluded_carriers: tuple[str, ...] = (),
 ) -> list[int]:
     return [
         candidate.price
@@ -111,6 +117,7 @@ def extract_prices(
             min_price=min_price,
             outbound_departure_latest=outbound_departure_latest,
             excluded_origin_airports=excluded_origin_airports,
+            excluded_carriers=excluded_carriers,
         )
     ]
 
@@ -121,6 +128,7 @@ def extract_price_candidates(
     min_price: int = 1_000,
     outbound_departure_latest: str | None = None,
     excluded_origin_airports: tuple[str, ...] = (),
+    excluded_carriers: tuple[str, ...] = (),
 ) -> list[LivePriceCandidate]:
     relevant_text = _direct_flights_section(page_text) if direct_only else page_text
     if outbound_departure_latest:
@@ -129,6 +137,7 @@ def extract_price_candidates(
             outbound_departure_latest,
             min_price,
             excluded_origin_airports,
+            excluded_carriers,
         )
 
     candidates = []
@@ -198,6 +207,7 @@ def _extract_timed_prices(
     latest_time: str,
     min_price: int,
     excluded_origin_airports: tuple[str, ...] = (),
+    excluded_carriers: tuple[str, ...] = (),
 ) -> list[int]:
     return [
         candidate.price
@@ -206,6 +216,7 @@ def _extract_timed_prices(
             latest_time,
             min_price,
             excluded_origin_airports,
+            excluded_carriers,
         )
     ]
 
@@ -215,6 +226,7 @@ def _extract_timed_candidates(
     latest_time: str,
     min_price: int,
     excluded_origin_airports: tuple[str, ...] = (),
+    excluded_carriers: tuple[str, ...] = (),
 ) -> list[LivePriceCandidate]:
     latest_minutes = _time_to_minutes(latest_time)
     if latest_minutes is None:
@@ -222,12 +234,22 @@ def _extract_timed_candidates(
 
     lines = [line.strip() for line in section_text.splitlines() if line.strip()]
     excluded_airports = {airport.upper() for airport in excluded_origin_airports}
+    excluded_carrier_names = {carrier.casefold() for carrier in excluded_carriers}
+    carriers_by_price = _carriers_by_price(lines)
+    excluded_carrier_prices = {
+        price
+        for price, carriers in carriers_by_price.items()
+        if any(carrier.casefold() in excluded_carrier_names for carrier in carriers)
+    }
     candidates: list[LivePriceCandidate] = []
     for index, line in enumerate(lines):
         price = _parse_price(line)
         if price is None or price < min_price or price > 1_000_000:
             continue
         if "багаж" in line.lower():
+            continue
+        carriers = carriers_by_price.get(price, ())
+        if any(carrier.casefold() in excluded_carrier_names for carrier in carriers) or price in excluded_carrier_prices:
             continue
 
         next_lines = lines[index + 1 :]
@@ -276,6 +298,7 @@ def _extract_timed_candidates(
                 arrival_time=flight_times[-1] if len(flight_times) > 1 else None,
                 origin_airport=block_airports[0] if block_airports else None,
                 destination_airport=block_airports[-1] if len(block_airports) > 1 else None,
+                carrier=carriers[0] if carriers else None,
             )
         )
     return sorted(
@@ -296,6 +319,59 @@ def _normalize_airports(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip().upper() for item in value if str(item).strip())
 
 
+def _normalize_names(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _carriers_by_price(lines: list[str]) -> dict[int, tuple[str, ...]]:
+    carriers_by_price: dict[int, list[str]] = {}
+    for index, line in enumerate(lines):
+        price = _parse_price(line)
+        if price is None:
+            continue
+        carrier = _previous_label(lines, index)
+        if carrier and _looks_like_carrier(carrier):
+            carriers_by_price.setdefault(price, [])
+            if carrier not in carriers_by_price[price]:
+                carriers_by_price[price].append(carrier)
+    return {price: tuple(carriers) for price, carriers in carriers_by_price.items()}
+
+
+def _previous_label(lines: list[str], index: int) -> str | None:
+    for candidate in reversed(lines[:index]):
+        if _parse_price(candidate) is not None:
+            return None
+        if _time_to_minutes(candidate) is not None:
+            continue
+        if re.fullmatch(r"[A-ZА-Я]{3}", candidate.upper()):
+            continue
+        if candidate.lower() in {"москва", "стамбул"}:
+            continue
+        return candidate
+    return None
+
+
+def _looks_like_carrier(text: str) -> bool:
+    normalized = text.casefold()
+    carrier_markers = (
+        "победа",
+        "s7",
+        "аэрофлот",
+        "airlines",
+        "авиалинии",
+        "уральские",
+        "turkish",
+        "southwind",
+        "red wings",
+        "азимут",
+    )
+    return any(marker in normalized for marker in carrier_markers)
+
+
 def _format_candidate(candidate: LivePriceCandidate) -> str:
     route = " -> ".join(
         airport
@@ -308,8 +384,12 @@ def _format_candidate(candidate: LivePriceCandidate) -> str:
         if time
     )
     if route and times:
-        return f"{route}, {times}"
-    return route or times or "details unavailable"
+        details = f"{route}, {times}"
+    else:
+        details = route or times or "details unavailable"
+    if candidate.carrier:
+        return f"{details}, {candidate.carrier}"
+    return details
 
 
 def _parse_price(text: str) -> int | None:
