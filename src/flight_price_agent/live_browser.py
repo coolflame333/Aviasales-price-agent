@@ -20,6 +20,7 @@ class LiveSearchConfig:
     profile_dir: str | None = None
     manual_check_seconds: int = 0
     outbound_departure_latest: str | None = None
+    excluded_origin_airports: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,11 +43,13 @@ def load_live_config(path: str | Path) -> list[LiveSearchConfig]:
         "manual_check_seconds": int(raw.get("manual_check_seconds", 0)),
         "min_price": int(raw.get("min_price", 10_000)),
         "outbound_departure_latest": raw.get("outbound_departure_latest"),
+        "excluded_origin_airports": _normalize_airports(raw.get("excluded_origin_airports")),
     }
 
     searches = []
     for item in raw.get("searches", []):
         payload = {**defaults, **item}
+        payload["excluded_origin_airports"] = _normalize_airports(payload.get("excluded_origin_airports"))
         searches.append(LiveSearchConfig(**payload))
     if not searches:
         raise ValueError("Live config must contain at least one item in 'searches'.")
@@ -60,6 +63,7 @@ def check_live_search(search: LiveSearchConfig, previous_price: int | None = Non
         direct_only=search.direct_only,
         min_price=search.min_price,
         outbound_departure_latest=search.outbound_departure_latest,
+        excluded_origin_airports=search.excluded_origin_airports,
     )
     price = min(prices) if prices else None
 
@@ -85,12 +89,17 @@ def extract_prices(
     direct_only: bool = True,
     min_price: int = 1_000,
     outbound_departure_latest: str | None = None,
+    excluded_origin_airports: tuple[str, ...] = (),
 ) -> list[int]:
     relevant_text = _direct_flights_section(page_text) if direct_only else page_text
     if outbound_departure_latest:
-        prices = _extract_timed_prices(relevant_text, outbound_departure_latest, min_price)
-        if prices:
-            return prices
+        prices = _extract_timed_prices(
+            relevant_text,
+            outbound_departure_latest,
+            min_price,
+            excluded_origin_airports,
+        )
+        return prices
 
     prices = []
     for match in re.finditer(r"(\d[\d\s\u00a0]{2,})\s*(?:₽|руб|RUB)", relevant_text, re.IGNORECASE):
@@ -140,13 +149,10 @@ def _direct_flights_section(page_text: str) -> str:
     end_candidates = [
         lower_tail.find(marker)
         for marker in (
-            "рекомендованный",
-            "рекомендуемый",
-            "оптимальный",
-            "самый дешёвый",
-            "рейсы с пересадками",
-            "с пересадками",
             "другие рейсы",
+            "показать ещё билеты",
+            "авиакомпании\n",
+            "направления\n",
         )
         if lower_tail.find(marker) > 0
     ]
@@ -155,30 +161,66 @@ def _direct_flights_section(page_text: str) -> str:
     return tail[: min(end_candidates)]
 
 
-def _extract_timed_prices(section_text: str, latest_time: str, min_price: int) -> list[int]:
+def _extract_timed_prices(
+    section_text: str,
+    latest_time: str,
+    min_price: int,
+    excluded_origin_airports: tuple[str, ...] = (),
+) -> list[int]:
     latest_minutes = _time_to_minutes(latest_time)
     if latest_minutes is None:
         return []
 
     lines = [line.strip() for line in section_text.splitlines() if line.strip()]
+    excluded_airports = {airport.upper() for airport in excluded_origin_airports}
     prices: list[int] = []
     for index, line in enumerate(lines):
         price = _parse_price(line)
         if price is None or price < min_price or price > 1_000_000:
             continue
+        if "багаж" in line.lower():
+            continue
 
         next_lines = lines[index + 1 :]
         next_price_index = next(
-            (offset for offset, next_line in enumerate(next_lines) if _parse_price(next_line) is not None),
+            (
+                offset
+                for offset, next_line in enumerate(next_lines)
+                if _parse_price(next_line) is not None and "багаж" not in next_line.lower()
+            ),
             len(next_lines),
         )
-        time_lines = next_lines[:next_price_index]
-        if any(
-            (minutes := _time_to_minutes(candidate)) is not None and minutes <= latest_minutes
-            for candidate in time_lines
-        ):
+        flight_lines = next_lines[:next_price_index]
+        flight_text = "\n".join(flight_lines).lower()
+        if "пересад" in flight_text:
+            continue
+        if excluded_airports:
+            block_airports = {
+                candidate.upper()
+                for candidate in flight_lines
+                if re.fullmatch(r"[A-ZА-Я]{3}", candidate.upper())
+            }
+            if block_airports & excluded_airports:
+                continue
+            if not block_airports:
+                continue
+
+        flight_times = [
+            minutes
+            for candidate in flight_lines
+            if (minutes := _time_to_minutes(candidate)) is not None
+        ]
+        if flight_times and flight_times[0] <= latest_minutes:
             prices.append(price)
     return sorted(set(prices))
+
+
+def _normalize_airports(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip().upper(),) if value.strip() else ()
+    return tuple(str(item).strip().upper() for item in value if str(item).strip())
 
 
 def _parse_price(text: str) -> int | None:
