@@ -37,7 +37,7 @@ class TelegramNotifier:
         payload_data = {
             "chat_id": chat_id,
             "text": text,
-            "disable_web_page_preview": "false",
+            "disable_web_page_preview": "true",
         }
         if reply_markup:
             payload_data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
