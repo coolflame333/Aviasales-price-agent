@@ -236,6 +236,8 @@ def _extract_timed_candidates(
     excluded_airports = {airport.upper() for airport in excluded_origin_airports}
     excluded_carrier_names = {carrier.casefold() for carrier in excluded_carriers}
     carriers_by_price = _carriers_by_price(lines)
+    excluded_carrier_times = _excluded_carrier_times(lines, excluded_carrier_names)
+    excluded_carrier_price_times = _excluded_carrier_price_times(lines, excluded_carrier_names)
     excluded_carrier_prices = {
         price
         for price, carriers in carriers_by_price.items()
@@ -291,6 +293,10 @@ def _extract_timed_candidates(
             continue
         if (departure_minutes := _time_to_minutes(flight_times[0])) is None or departure_minutes > latest_minutes:
             continue
+        if flight_times[0] in excluded_carrier_times:
+            continue
+        if (price, flight_times[0]) in excluded_carrier_price_times:
+            continue
         candidates.append(
             LivePriceCandidate(
                 price=price,
@@ -339,6 +345,62 @@ def _carriers_by_price(lines: list[str]) -> dict[int, tuple[str, ...]]:
             if carrier not in carriers_by_price[price]:
                 carriers_by_price[price].append(carrier)
     return {price: tuple(carriers) for price, carriers in carriers_by_price.items()}
+
+
+def _excluded_carrier_price_times(lines: list[str], excluded_carriers: set[str]) -> set[tuple[int, str]]:
+    if not excluded_carriers:
+        return set()
+
+    excluded: set[tuple[int, str]] = set()
+    for index, line in enumerate(lines):
+        price = _parse_price(line)
+        if price is None:
+            continue
+        carrier = _previous_label(lines, index)
+        if not carrier or carrier.casefold() not in excluded_carriers:
+            continue
+        next_lines = lines[index + 1 :]
+        next_price_index = next(
+            (
+                offset
+                for offset, next_line in enumerate(next_lines)
+                if _parse_price(next_line) is not None and "багаж" not in next_line.lower()
+            ),
+            len(next_lines),
+        )
+        for candidate in next_lines[:next_price_index]:
+            if _time_to_minutes(candidate) is not None:
+                excluded.add((price, candidate))
+    return excluded
+
+
+def _excluded_carrier_times(lines: list[str], excluded_carriers: set[str]) -> set[str]:
+    if not excluded_carriers:
+        return set()
+
+    excluded: set[str] = set()
+    for index, line in enumerate(lines):
+        price = _parse_price(line)
+        if price is None:
+            continue
+        carrier = _previous_label(lines, index)
+        if not carrier or carrier.casefold() not in excluded_carriers:
+            continue
+        next_lines = lines[index + 1 :]
+        next_price_index = next(
+            (
+                offset
+                for offset, next_line in enumerate(next_lines)
+                if _parse_price(next_line) is not None and "багаж" not in next_line.lower()
+            ),
+            len(next_lines),
+        )
+        excluded.update(
+            candidate
+            for candidate in next_lines[:next_price_index]
+            if _time_to_minutes(candidate) is not None
+        )
+    return excluded
 
 
 def _previous_label(lines: list[str], index: int) -> str | None:
